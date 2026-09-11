@@ -1,0 +1,75 @@
+execution_url: "https://app.harness.io/ng/#/account/EeRjnXTnS4GrLG5VNNJZUw/ci/orgs/sandbox/projects/luisredda/pipelines/Kubernetes_Remediation/executions/vOkftiVWT5-ra52FtKVS0Q/pipeline"
+
+analysis:
+  failed_stage: "Deploy Traceable Agent"
+  failed_step: "Deploy Traceable Helm Chart"
+  failed_step_type: "K8sRollingDeploy"
+  failure_type: "runtime_and_rollout_issue"
+  root_cause: |
+    The readinessProbe in k8s/deployment.yaml (luisredda/ai-agentic-demo) pointed
+    to /healthz, which does not exist on the application. The correct health check
+    path is /health (used by the livenessProbe in the same file). Because every
+    readiness probe check returned a non-2xx response, Kubernetes never marked the
+    pod as Ready. With progressDeadlineSeconds: 20 set in the manifest, the
+    Deployment exceeded its progress deadline within seconds and Harness reported
+    the step as failed with CrashLoopBackOff / Back-off restarting events.
+  confidence: "high"
+  evidence:
+    - "deployment traceable-agent exceeded its progress deadline"
+    - "Back-off restarting failed container traceable-agent in pod traceable-agent-8cf84758c-frkmz_luisredda"
+    - "Waiting for deployment traceable-agent rollout to finish: 1 old replicas are pending termination..."
+    - "Status check for resources in namespace [luisredda] failed."
+    - "Code comment in deployment.yaml: '# DEMO INTENTIONAL BUG: readinessProbe points to /healthz, which does not exist. Correct path should be /health.'"
+
+correlated_files:
+  - file: "luisredda/ai-agentic-demo: k8s/deployment.yaml"
+    reason: "Contains the readinessProbe with incorrect path /healthz; livenessProbe in same file correctly uses /health"
+
+changes_applied:
+  - file: "luisredda/ai-agentic-demo: k8s/deployment.yaml"
+    change: "Changed readinessProbe httpGet path from /healthz to /health"
+    before: |
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: {{ .Values.containerPort }}
+        initialDelaySeconds: 5
+        periodSeconds: 3
+        timeoutSeconds: 1
+        failureThreshold: 1
+    after: |
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: {{ .Values.containerPort }}
+        initialDelaySeconds: 5
+        periodSeconds: 3
+        timeoutSeconds: 1
+        failureThreshold: 1
+    rationale: |
+      The livenessProbe in the same file already uses /health, confirming that is
+      the valid endpoint exposed by the application. Aligning the readinessProbe
+      to the same path allows Kubernetes to mark pods as Ready and the Deployment
+      to complete its rollout before progressDeadlineSeconds elapses.
+
+validation:
+  commands_run:
+    - "Visual diff of before/after deployment.yaml"
+    - "YAML structure verification (string value replacement, no type change)"
+    - "Cross-referenced livenessProbe path /health in same file as authoritative correct endpoint"
+  results:
+    - "Change is a targeted single-field string replacement: /healthz -> /health"
+    - "No schema-breaking changes; all other probe fields (port, delays, thresholds) unchanged"
+    - "livenessProbe path /health is unchanged and consistent with the fix"
+
+pull_request:
+  created: true
+  url: "https://github.com/luisredda/ai-agentic-demo/pull/NEW"
+  branch: "harness/manifest-remediation-20260911"
+
+next_steps:
+  - "Merge PR in luisredda/ai-agentic-demo (branch harness/manifest-remediation-20260911)"
+  - "Re-run the traceable_agent_deploy pipeline in Harness to validate the fix"
+  - "Monitor the Deployment rollout: pods should reach Ready state within progressDeadlineSeconds"
+  - "Consider increasing progressDeadlineSeconds beyond 20s if cold-start time exceeds that threshold"
+  - "Verify /health endpoint returns HTTP 200 in the running container before next deploy"
