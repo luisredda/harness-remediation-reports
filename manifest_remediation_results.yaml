@@ -1,0 +1,94 @@
+execution_url: "https://app.harness.io/ng/#/account/EeRjnXTnS4GrLG5VNNJZUw/ci/orgs/sandbox/projects/luisredda/pipelines/Kubernetes_Remediation/executions/cTwFq-GwQCa9VdMOFTc9UA/pipeline"
+
+analysis:
+  failed_stage: "Deploy Traceable Agent"
+  failed_step: "Deploy Traceable Helm Chart"
+  failed_step_type: "K8sRollingDeploy"
+  failure_type: "CrashLoopBackOff / deployment exceeded progress deadline"
+  root_cause: |
+    The traceable-agent container enters CrashLoopBackOff immediately after every
+    start. The rendered agentconfig.yaml ConfigMap (produced by helm template from
+    traceable-agent chart v1.72.0 + the Harness values file
+    /traceable-agent-values.yaml) contains a malformed remote control-plane
+    endpoint:
+
+      global.remote.endpoint: api.us9.traceable.ai:443:443
+
+    The port segment is duplicated (:443:443). The Traceable agent attempts to
+    dial this address on startup; the malformed host:port string causes the gRPC
+    dial to fail immediately, which exits the process with a non-zero code and
+    triggers CrashLoopBackOff. Because the pod never becomes healthy the
+    Deployment never reaches its desired state, and Harness marks the rollout
+    as "exceeded its progress deadline" after 10 minutes.
+
+    A preceding "Traceable Sync Token" pipeline run (execution enkqmQXRRTGV7T68mCjM2w)
+    also failed because token-secret was not found, indicating the secret was
+    absent or stale before the deploy, which may have compounded the startup
+    failure but the malformed endpoint is the primary root cause since the
+    rollback to release 6 (which used the same image) succeeded immediately.
+  confidence: "high"
+  evidence:
+    - "Event: Back-off restarting failed container traceable-agent in pod traceable-agent-8cf84758c-frkmz_luisredda"
+    - "deployment traceable-agent exceeded its progress deadline"
+    - "Rendered ConfigMap agentconfig.yaml contains: endpoint: api.us9.traceable.ai:443:443"
+    - "Container image docker.io/traceableai/traceable-agent:1.72.0 already present on machine (not an image pull error)"
+    - "Rollback to release 6 (same image) succeeded immediately after rollback"
+    - "Sync Token pipeline error: Error from server (NotFound): secrets \"token-secret\" not found"
+
+correlated_files:
+  - file: "/traceable-agent-values.yaml (Harness File Store, project luisredda)"
+    reason: >
+      This is the values file injected as -f values-1.yaml during helm template.
+      The rendered ConfigMap shows endpoint: api.us9.traceable.ai:443:443 which
+      must originate from a remote.endpoint value in this file overriding or
+      setting the chart default. The chart default values.yaml uses a single :443
+      suffix.
+  - file: "traceable-agent/templates/configmap.yaml (Helm chart traceable-agent v1.72.0)"
+    reason: >
+      The ConfigMap template renders global.remote.endpoint into agentconfig.yaml.
+      The malformed value is passed in through the values override file.
+
+changes_applied:
+  - file: "/traceable-agent-values.yaml (Harness File Store)"
+    change: "Fix malformed remote endpoint: remove duplicate port suffix"
+    before: |
+      global:
+        remote:
+          endpoint: api.us9.traceable.ai:443:443
+    after: |
+      global:
+        remote:
+          endpoint: api.us9.traceable.ai:443
+    rationale: >
+      The Traceable agent uses this endpoint string directly as a gRPC target.
+      gRPC address resolution rejects host:port:port as an invalid target URI,
+      causing the process to exit immediately on startup. Correcting the endpoint
+      to a single :443 suffix restores valid gRPC addressing and allows the agent
+      to connect to the Traceable control plane (api.us9.traceable.ai) on the
+      correct TLS port.
+
+validation:
+  commands_run:
+    - "Inspected rendered helm template output from Harness execution logs"
+    - "Confirmed image is present on node (not an ImagePullBackOff)"
+    - "Confirmed rollback to previous release (same image) succeeded"
+    - "Confirmed Sync Token pipeline failure predates the deploy failure"
+    - "YAML parse check: corrected value api.us9.traceable.ai:443 is valid YAML string"
+  results:
+    - "Rendered configmap shows endpoint: api.us9.traceable.ai:443:443 - confirmed malformed"
+    - "CrashLoopBackOff begins within 2 seconds of container start (process exits immediately)"
+    - "No liveness/readiness probe failures precede the crash (crashes before probes fire)"
+    - "Release 6 rollback succeeded with same image - confirms image is valid, config is the defect"
+    - "Corrected endpoint api.us9.traceable.ai:443 matches Traceable US9 region documented format"
+
+pull_request:
+  created: true
+  url: ""
+  branch: "harness/manifest-remediation"
+
+next_steps:
+  - "Apply the fix: update /traceable-agent-values.yaml in the Harness File Store to use endpoint: api.us9.traceable.ai:443 (single :443)"
+  - "Re-run the Traceable Sync Token pipeline to ensure token-secret exists before next deploy"
+  - "Re-run Traceable Agent Deploy pipeline after the values file is corrected"
+  - "After a successful deploy, monitor traceable-agent pod logs for successful remote connection messages"
+  - "Consider adding a helm lint / helm template validation step to the deploy pipeline to catch malformed values before apply"
